@@ -1,0 +1,265 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON Viewer</title>
+  <link href="https://cdn.jsdelivr.net/npm/jsoneditor@9.10.0/dist/jsoneditor.min.css" rel="stylesheet"/>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { 
+      height: 100vh; 
+      margin: 0; 
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      overflow: hidden;
+    }
+    .topbar { color:#3B755F; display:flex; gap:5px; padding:10px 25px; align-items:center; justify-content: center; background-color:#EAEAEA; }
+    button, input[type=text], select { padding:5px 10px; border-style:none; background:white; }
+    button {
+      padding: 3px 9px;
+    }
+    button:hover {
+      cursor: pointer;
+      background-color: gainsboro;
+    }
+    input[type=file] {max-width: 200px;}
+    input[type=text], select {max-width: 100px;}
+    .small { font-size:0.85rem; }
+    .db-list { display:flex; gap:10px; align-items:center; }
+    .status { font-size: 0.8rem; font-weight:bold ;}
+    #editor { height:calc(100vh - 56px); }
+    .jsoneditor { border-style: none; }
+    .jsoneditor-menu { background-color:#3B755F; border-style: none; }
+    
+    /* 手机响应式 */
+    @media (max-width: 768px) {
+      .topbar {
+        flex-direction: column;
+      }  
+      button, input[type=text], select {
+        width: 100%;
+      }
+      #editor { 
+        height:calc(100vh - 112px); 
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="left">
+      <span class="status" id="status"></span>
+      <input id="fileInput" type="file" accept=".json,application/json" />
+    </div>
+
+    <div class="db-list">
+      <input id="saveName" type="text" placeholder="保存名 (可选)" />
+      <button id="btnSave" class="small">保存</button>
+      <select id="savedList">选择</select>
+      <button id="btnLoadSaved" class="small">加载</button>
+      <button id="btnDeleteSaved" class="small">删除</button>
+      <button id="btnExportSaved" class="small">导出</button>
+    </div>
+  </div>
+
+  <div id="editor"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsoneditor@9.10.0/dist/jsoneditor.min.js"></script>
+  <script>
+  // 简单的 IndexedDB helper（无需第三方库）
+  const DB_NAME = 'json_viewer_db';
+  const STORE_NAME = 'json_files';
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const rq = indexedDB.open(DB_NAME, 1);
+      rq.onupgradeneeded = () => {
+        const db = rq.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      rq.onsuccess = () => resolve(rq.result);
+      rq.onerror = () => reject(rq.error);
+    });
+  }
+  async function putFile(id, name, jsonObj) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put({ id, name, json: jsonObj, savedAt: Date.now() });
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  async function getAllKeysAndMeta() {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const arr = [];
+      store.openCursor().onsuccess = (e) => {
+        const cur = e.target.result;
+        if (!cur) { res(arr); return; }
+        arr.push({ id: cur.value.id, name: cur.value.name || cur.value.id, savedAt: cur.value.savedAt });
+        cur.continue();
+      };
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  async function getById(id) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const rq = store.get(id);
+      rq.onsuccess = () => res(rq.result ? rq.result.json : null);
+      rq.onerror = () => rej(rq.error);
+    });
+  }
+  async function deleteById(id) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).delete(id);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+
+  // JSONEditor 初始化
+  const container = document.getElementById('editor');
+  const options = { mode: 'view', navigationBar: true, mainMenuBar: true, search: true };
+  const editor = new JSONEditor(container, options);
+
+  const statusEl = document.getElementById('status');
+  function setStatus(s) { statusEl.textContent = s; }
+
+  // 文件加载与展示
+  const fileInput = document.getElementById('fileInput');
+  document.getElementById('fileInput').addEventListener('change', async (e) => {
+    const fileInput = e.target;
+    const f = fileInput.files[0];
+    if (!f) { setStatus('请选择文件'); return; }
+    setStatus('读取中...');
+    try {
+      // FileReader 读取（几十 MB 通常可行）
+      const text = await readFileAsText(f);
+      // 解析时捕获异常，保护页面不崩溃
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        setStatus('解析失败');
+        console.error(e);
+        return;
+      }
+      editor.set(parsed);
+      setStatus(`(${(f.size/1024/1024).toFixed(2)} MB)`);
+    } catch (err) {
+      console.error(err);
+      setStatus('读取失败');
+    }
+  });
+
+  function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = () => reject(fr.error);
+      fr.onload = () => resolve(fr.result);
+      fr.readAsText(file, 'utf-8');
+    });
+  }
+
+  // 保存到 IndexedDB
+  document.getElementById('btnSave').addEventListener('click', async () => {
+    let data;
+    try {
+      data = editor.get();
+    } catch (e) {
+      setStatus('出错了');
+      return;
+    }
+    const name = (document.getElementById('saveName').value || '').trim();
+    // 用时间戳+随机数生成 id，避免冲突
+    const id = `${Date.now()}`;
+    setStatus('正在保存...');
+    try {
+      await putFile(id, name || `json-${id}`, data);
+      await refreshSavedList();
+      setStatus('保存成功');
+    } catch (e) {
+      console.error(e);
+      setStatus('保存失败');
+    }
+  });
+
+  // 列表、加载、删除、导出
+  const savedList = document.getElementById('savedList');
+  async function refreshSavedList() {
+    savedList.innerHTML = '';
+    const items = await getAllKeysAndMeta();
+    items.sort((a,b) => b.savedAt - a.savedAt);
+    for (const it of items) {
+      const opt = document.createElement('option');
+      opt.value = it.id;
+      opt.textContent = `${it.name}`;
+      savedList.appendChild(opt);
+    }
+  }
+  document.getElementById('btnLoadSaved').addEventListener('click', async () => {
+    const id = savedList.value;
+    if (!id) { setStatus('未选择'); return; }
+    setStatus('加载中...');
+    try {
+      const data = await getById(id);
+      if (data === null) { setStatus('未找到数据'); return; }
+      editor.set(data);
+      setStatus('已加载');
+    } catch (e) {
+      console.error(e);
+      setStatus('加载失败');
+    }
+  });
+  document.getElementById('btnDeleteSaved').addEventListener('click', async () => {
+    const id = savedList.value;
+    if (!id) { setStatus('未选择'); return; }
+    await deleteById(id);
+    await refreshSavedList();
+    setStatus('已删除');
+  });
+  document.getElementById('btnExportSaved').addEventListener('click', async () => {
+    const id = savedList.value;
+    if (!id) { setStatus('未选择'); return; }
+    const data = await getById(id);
+    if (!data) { setStatus('未找到数据'); return; }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (savedList.selectedOptions[0]?.textContent?.split(' — ')[0] || `export-${id}`).replace(/\s+/g, '_') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatus('导出已触发');
+  });
+
+  // 初始化
+  (async () => {
+    await refreshSavedList();
+    setStatus('等待操作');
+  })();
+
+  // 小提示：支持拖放文件到页面任意处
+  window.addEventListener('dragover', e => { e.preventDefault(); });
+  window.addEventListener('drop', async e => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      fileInput.dispatchEvent(new Event('change', {bubbles: ture}))
+    }
+  });
+  </script>
+</body>
+</html>
